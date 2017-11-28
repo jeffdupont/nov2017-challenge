@@ -36,7 +36,7 @@ func (l *logfile) create() error {
 	if l.handler != nil {
 		l.handler.Close()
 	}
-	file, err := os.OpenFile(l.getFilename(), os.O_CREATE, 0755)
+	file, err := os.OpenFile(l.getFilename(), os.O_CREATE|os.O_WRONLY, 0755)
 	if err != nil {
 		log.Fatalf("could not open file: %v\n", err)
 	}
@@ -71,7 +71,7 @@ func (s *store) update(m metric) (string, error) {
 		m.count = cm.count + 1
 	}
 	s.data[m.name] = m
-	if m.count == 0 {
+	if m.count == 1 {
 		return m.name, nil
 	}
 	return "", nil
@@ -108,8 +108,8 @@ func newStore() *store {
 }
 
 var (
-	rawCount  uint64
-	fileCount uint64
+	rawCount    uint64
+	periodCount uint64
 )
 
 // Make sure the name contains only valid characters
@@ -124,7 +124,7 @@ func validate(str string) bool {
 		return false
 	}
 	if num < 1000000 {
-		fmt.Println(str, "invalid number: less than 1000000")
+		fmt.Println(str, "invalid input: less than 1000000")
 		return false
 	}
 	return true
@@ -135,7 +135,7 @@ func parseMetric(line string) (*metric, error) {
 	// validate name
 	name := line
 	if ok := validate(name); !ok {
-		return nil, fmt.Errorf("invalid input: name ")
+		return nil, fmt.Errorf("invalid input")
 	}
 
 	return &metric{name: name, count: 1}, nil
@@ -175,13 +175,15 @@ func main() {
 			case m := <-ingress:
 				name, _ := store.update(m)
 				if name != "" {
+					// fmt.Println(name)
 					err = lf.write(name)
 					if err != nil {
 						log.Fatalf("could not write %s: %v\n", name, err)
 					}
 				}
 			case <-tickerFive.C:
-				fmt.Fprintf(os.Stderr, "(5 sec): Record count %d\n", atomic.LoadUint64(&rawCount))
+				fmt.Fprintf(os.Stderr, "(5 sec): Uniques %d\tPeriod %d\tTotal count %d\n", len(store.data), atomic.LoadUint64(&periodCount), atomic.LoadUint64(&rawCount))
+				atomic.StoreUint64(&periodCount, 0) // reset the count
 			case <-tickerTen.C:
 				lf.count++
 				lf.create()
@@ -241,5 +243,11 @@ func connHandler(conn net.Conn, s semaphore, ingress chan metric, shutdown chan 
 
 		// save the metric to the store
 		ingress <- *metric
+
+		// increment our total counter for the time the server is running
+		atomic.AddUint64(&rawCount, 1)
+
+		// increment total for the given period
+		atomic.AddUint64(&periodCount, 1)
 	}
 }
