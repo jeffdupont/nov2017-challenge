@@ -13,15 +13,9 @@ import (
 	"time"
 )
 
-type metric struct {
-	name  string
-	count int
-}
-
 type logfile struct {
-	filename string
-	count    int
-	handler  *os.File
+	count   int
+	handler *os.File
 }
 
 func (l *logfile) getFilename() string {
@@ -58,21 +52,21 @@ const maxConnections = 6
 // that all metric names are distinct. I used RW to allow concurrent reads
 // when check that the key exists before locking to save the metric
 type store struct {
-	data map[string]metric
+	data map[string]int
 }
 
 // Update checks to see if the metric key exists
 // and then updates the existing value before it is saved
 // back to the data store
-func (s *store) update(m metric) (string, error) {
+func (s *store) update(v string) (string, error) {
 	// check if the metric exists
-	if _, ok := s.data[m.name]; ok {
-		cm := s.data[m.name]
-		m.count = cm.count + 1
+	if _, ok := s.data[v]; ok {
+		s.data[v] = s.data[v] + 1
+	} else {
+		s.data[v] = 1
 	}
-	s.data[m.name] = m
-	if m.count == 1 {
-		return m.name, nil
+	if s.data[v] == 1 {
+		return v, nil
 	}
 	return "", nil
 }
@@ -81,7 +75,7 @@ type empty struct{}
 type semaphore chan empty
 
 // acquire n resources
-func (s semaphore) Process(n int) {
+func (s semaphore) process(n int) {
 	e := empty{}
 	for i := 0; i < n; i++ {
 		s <- e
@@ -89,22 +83,22 @@ func (s semaphore) Process(n int) {
 }
 
 // release n resources
-func (s semaphore) Release(n int) {
+func (s semaphore) release(n int) {
 	for i := 0; i < n; i++ {
 		<-s
 	}
 }
 
 func (s semaphore) Signal() {
-	s.Release(1)
+	s.release(1)
 }
 func (s semaphore) Wait(n int) {
-	s.Process(n)
+	s.process(n)
 }
 
 // Initializes the store db for the metric data
 func newStore() *store {
-	return &store{make(map[string]metric)}
+	return &store{make(map[string]int)}
 }
 
 var (
@@ -131,14 +125,13 @@ func validate(str string) bool {
 }
 
 // Parse the input line
-func parseMetric(line string) (*metric, error) {
+func parseMetric(line string) (string, error) {
 	// validate name
-	name := line
-	if ok := validate(name); !ok {
-		return nil, fmt.Errorf("invalid input")
+	if ok := validate(line); !ok {
+		return "", fmt.Errorf("invalid input")
 	}
 
-	return &metric{name: name, count: 1}, nil
+	return line, nil
 }
 
 func main() {
@@ -148,7 +141,7 @@ func main() {
 	// initialize the main store db
 	store := newStore()
 
-	ingress := make(chan metric)
+	ingress := make(chan string)
 	sd := make(chan empty)
 
 	// establish the tcp listener
@@ -203,7 +196,7 @@ func main() {
 	}
 }
 
-func connHandler(conn net.Conn, s semaphore, ingress chan metric, shutdown chan empty) {
+func connHandler(conn net.Conn, s semaphore, ingress chan string, shutdown chan empty) {
 	defer s.Signal()
 	reader := bufio.NewReader(conn)
 
@@ -231,6 +224,7 @@ func connHandler(conn net.Conn, s semaphore, ingress chan metric, shutdown chan 
 		// shutdown the connect and end the server
 		if line == "shutdown" {
 			shutdown <- empty{}
+			return
 		}
 
 		// parse the metric
@@ -242,7 +236,7 @@ func connHandler(conn net.Conn, s semaphore, ingress chan metric, shutdown chan 
 		}
 
 		// save the metric to the store
-		ingress <- *metric
+		ingress <- metric
 
 		// increment our total counter for the time the server is running
 		atomic.AddUint64(&rawCount, 1)
